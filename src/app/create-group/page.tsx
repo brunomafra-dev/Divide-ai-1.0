@@ -100,7 +100,6 @@ export default function CreateGroup() {
           owner_id: myId,
           name,
           category,
-          participants: participantsJson, // <-- jsonb no groups
         })
         .select('id')
         .single()
