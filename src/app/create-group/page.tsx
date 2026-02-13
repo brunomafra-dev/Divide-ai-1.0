@@ -6,30 +6,23 @@ import { useRouter } from 'next/navigation'
 import { useEffect, useMemo, useState } from 'react'
 import { supabase } from '@/lib/supabase'
 
-type Category = 'apartment' | 'house' | 'trip' | 'other'
-
-interface ParticipantUI {
+interface Participant {
   id: string
   name: string
   email?: string
-  // flag apenas pra UI
-  isYou?: boolean
 }
+
+type Category = 'apartment' | 'house' | 'trip' | 'other'
 
 export default function CreateGroup() {
   const router = useRouter()
 
-  const [isLoading, setIsLoading] = useState(false)
-
+  const [loading, setLoading] = useState(false)
   const [groupName, setGroupName] = useState('')
   const [category, setCategory] = useState<Category>('other')
 
-  const [userId, setUserId] = useState<string | null>(null)
-  const [youName, setYouName] = useState<string>('Você')
-  const [youEmail, setYouEmail] = useState<string | undefined>(undefined)
-
-  const [participants, setParticipants] = useState<ParticipantUI[]>([
-    { id: 'you', name: 'Você', email: undefined, isYou: true },
+  const [participants, setParticipants] = useState<Participant[]>([
+    { id: 'me', name: 'Você' },
   ])
 
   const [newParticipantName, setNewParticipantName] = useState('')
@@ -45,40 +38,33 @@ export default function CreateGroup() {
     []
   )
 
-  // Carrega usuário logado e substitui o "Você" da lista
+  // Carrega usuário logado e atualiza o "Você"
   useEffect(() => {
-    const loadUser = async () => {
-      const {
-        data: { user },
-        error,
-      } = await supabase.auth.getUser()
+    let cancelled = false
 
-      if (error) {
-        console.error('Erro ao pegar usuário:', error)
-      }
+    async function loadMe() {
+      const { data, error } = await supabase.auth.getUser()
+      if (cancelled) return
 
-      if (!user) {
-        // se seu login for outra rota, troca aqui
+      if (error || !data?.user) {
+        // Se não tiver logado, manda pra login (ajusta a rota se for diferente)
         router.push('/login')
         return
       }
 
-      setUserId(user.id)
-
-      const metaName =
+      const user = data.user
+      const displayName =
         (user.user_metadata?.full_name as string | undefined) ||
-        (user.user_metadata?.name as string | undefined) ||
+        (user.email ? user.email.split('@')[0] : undefined) ||
         'Você'
 
-      setYouName(metaName)
-      setYouEmail(user.email ?? undefined)
-
-      setParticipants([
-        { id: 'you', name: metaName, email: user.email ?? undefined, isYou: true },
-      ])
+      setParticipants([{ id: 'me', name: displayName, email: user.email || undefined }])
     }
 
-    loadUser()
+    loadMe()
+    return () => {
+      cancelled = true
+    }
   }, [router])
 
   const addParticipant = () => {
@@ -87,7 +73,7 @@ export default function CreateGroup() {
 
     if (!name) return
 
-    const newP: ParticipantUI = {
+    const newP: Participant = {
       id: crypto.randomUUID(),
       name,
       email: email || undefined,
@@ -99,16 +85,13 @@ export default function CreateGroup() {
   }
 
   const removeParticipant = (id: string) => {
-    if (id === 'you') return
+    if (id === 'me') return
     setParticipants((prev) => prev.filter((p) => p.id !== id))
   }
 
-  const handleCreateGroup = async () => {
-    if (!userId) {
-      alert('Você precisa estar logado.')
-      router.push('/login')
-      return
-    }
+  const handleCreateGroup = async (e?: React.MouseEvent<HTMLButtonElement>) => {
+    e?.preventDefault()
+    if (loading) return
 
     const name = groupName.trim()
     if (!name || participants.length < 2) {
@@ -116,65 +99,73 @@ export default function CreateGroup() {
       return
     }
 
-    setIsLoading(true)
+    setLoading(true)
+
     try {
-      // 1) cria grupo com owner_id
-      const { data: createdGroup, error: groupError } = await supabase
+      // 1) Garantir user logado
+      const { data: userData, error: userErr } = await supabase.auth.getUser()
+      if (userErr || !userData?.user) {
+        alert('Você precisa estar logado.')
+        router.push('/login')
+        return
+      }
+      const user = userData.user
+
+      // 2) Criar grupo
+      const { data: group, error: groupErr } = await supabase
         .from('groups')
         .insert({
           name,
           category,
-          owner_id: userId,
+          owner_id: user.id,
         })
         .select('id')
         .single()
 
-      if (groupError) {
-        console.error('Erro ao criar grupo:', groupError)
-        alert(`Erro ao criar grupo: ${groupError.message}`)
+      if (groupErr || !group?.id) {
+        console.error('Erro ao criar grupo:', groupErr)
+        alert('Erro ao criar grupo no banco.')
         return
       }
 
-      const groupId = createdGroup.id as string
-
-      // 2) cria participants
-      // você entra com user_id = auth user
-      const rows = participants.map((p) => {
-        if (p.id === 'you') {
+      // 3) Inserir participantes
+      // Dono: user_id = user.id
+      // Convidados: user_id = null (precisa do SQL pra liberar null)
+      const payload = participants.map((p) => {
+        if (p.id === 'me') {
           return {
-            group_id: groupId,
-            user_id: userId,
-            name: p.name || youName,
-            email: p.email || youEmail || null,
+            group_id: group.id,
+            user_id: user.id,
+            name: p.name,
+            email: user.email ?? p.email ?? null,
           }
         }
 
-        // convidados por email/nome (sem user_id ainda)
         return {
-          group_id: groupId,
-          user_id: null, // IMPORTANT: precisa user_id aceitar NULL no banco
+          group_id: group.id,
+          user_id: null,
           name: p.name,
-          email: p.email || null,
+          email: p.email ?? null,
         }
       })
 
-      const { error: participantsError } = await supabase.from('participants').insert(rows)
+      const { error: partErr } = await supabase.from('participants').insert(payload)
 
-      if (participantsError) {
-        console.error('Grupo criado mas falhou participants:', participantsError)
-        alert(`Grupo criado, mas falhou ao salvar participantes: ${participantsError.message}`)
-        // mesmo assim, manda pro grupo (você decide)
-        router.push(`/group/${groupId}`)
+      if (partErr) {
+        console.error('Grupo criado, mas falhou ao salvar participantes:', partErr)
+        alert('Grupo foi criado, mas deu erro ao salvar participantes. (Veja o Console)')
+        // Mesmo assim, dá pra entrar no grupo
+        router.push(`/group/${group.id}`)
         return
       }
 
-      // 3) navega pro grupo
-      router.push(`/group/${groupId}`)
-    } catch (err: any) {
-      console.error('Erro inesperado:', err)
-      alert(`Erro inesperado: ${err?.message ?? 'desconhecido'}`)
+      // 4) Ir para a página do grupo
+      router.push(`/group/${group.id}`)
+    } catch (err) {
+      console.error(err)
+      alert('Erro inesperado ao criar grupo. Veja o Console.')
     } finally {
-      setIsLoading(false)
+      setLoading(false)
     }
   }
 
@@ -183,7 +174,7 @@ export default function CreateGroup() {
       {/* Header */}
       <header className="bg-white shadow-sm">
         <div className="max-w-4xl mx-auto px-4 py-4 flex justify-between items-center">
-          <Link href="/" aria-label="Voltar">
+          <Link href="/">
             <button type="button" className="text-gray-600 hover:text-gray-800">
               <ArrowLeft className="w-6 h-6" />
             </button>
@@ -194,10 +185,10 @@ export default function CreateGroup() {
           <button
             type="button"
             onClick={handleCreateGroup}
-            disabled={isLoading}
+            disabled={loading}
             className="text-[#5BC5A7] font-medium hover:text-[#4AB396] disabled:opacity-60"
           >
-            {isLoading ? 'Salvando...' : 'Criar'}
+            {loading ? 'Salvando...' : 'Criar'}
           </button>
         </div>
       </header>
@@ -244,7 +235,10 @@ export default function CreateGroup() {
           {/* Lista de Participantes */}
           <div className="space-y-2 mb-4">
             {participants.map((participant) => (
-              <div key={participant.id} className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
+              <div
+                key={participant.id}
+                className="flex items-center justify-between p-3 bg-gray-50 rounded-lg"
+              >
                 <div className="flex items-center gap-3">
                   <div className="w-10 h-10 bg-[#5BC5A7] rounded-full flex items-center justify-center">
                     <span className="text-white font-medium text-sm">
@@ -257,7 +251,7 @@ export default function CreateGroup() {
                   </div>
                 </div>
 
-                {participant.id !== 'you' && (
+                {participant.id !== 'me' && (
                   <button
                     type="button"
                     onClick={() => removeParticipant(participant.id)}
@@ -279,6 +273,7 @@ export default function CreateGroup() {
               placeholder="Nome do participante"
               className="w-full px-4 py-2 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#5BC5A7] focus:border-transparent text-sm"
             />
+
             <input
               type="email"
               value={newParticipantEmail}
@@ -286,6 +281,7 @@ export default function CreateGroup() {
               placeholder="Email (opcional)"
               className="w-full px-4 py-2 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#5BC5A7] focus:border-transparent text-sm"
             />
+
             <button
               type="button"
               onClick={addParticipant}
@@ -301,10 +297,10 @@ export default function CreateGroup() {
         <button
           type="button"
           onClick={handleCreateGroup}
-          disabled={isLoading}
+          disabled={loading}
           className="w-full py-4 bg-[#5BC5A7] text-white rounded-xl font-medium hover:bg-[#4AB396] transition-colors shadow-sm disabled:opacity-60"
         >
-          {isLoading ? 'Salvando...' : 'Criar grupo'}
+          {loading ? 'Salvando...' : 'Criar grupo'}
         </button>
       </main>
     </div>
