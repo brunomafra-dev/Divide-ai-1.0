@@ -3,7 +3,7 @@
 import { ArrowLeft, Plus, X } from 'lucide-react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
-import { useEffect, useMemo, useState } from 'react'
+import { useMemo, useState } from 'react'
 import { supabase } from '@/lib/supabase'
 
 interface Participant {
@@ -17,16 +17,18 @@ type Category = 'apartment' | 'house' | 'trip' | 'other'
 export default function CreateGroup() {
   const router = useRouter()
 
-  const [loading, setLoading] = useState(false)
   const [groupName, setGroupName] = useState('')
   const [category, setCategory] = useState<Category>('other')
 
+  // "Você" sempre existe
   const [participants, setParticipants] = useState<Participant[]>([
-    { id: 'me', name: 'Você' },
+    { id: '1', name: 'Você', email: 'voce@email.com' },
   ])
 
   const [newParticipantName, setNewParticipantName] = useState('')
   const [newParticipantEmail, setNewParticipantEmail] = useState('')
+
+  const [saving, setSaving] = useState(false)
 
   const categories = useMemo(
     () => [
@@ -38,60 +40,27 @@ export default function CreateGroup() {
     []
   )
 
-  // Carrega usuário logado e atualiza o "Você"
-  useEffect(() => {
-    let cancelled = false
-
-    async function loadMe() {
-      const { data, error } = await supabase.auth.getUser()
-      if (cancelled) return
-
-      if (error || !data?.user) {
-        // Se não tiver logado, manda pra login (ajusta a rota se for diferente)
-        router.push('/login')
-        return
-      }
-
-      const user = data.user
-      const displayName =
-        (user.user_metadata?.full_name as string | undefined) ||
-        (user.email ? user.email.split('@')[0] : undefined) ||
-        'Você'
-
-      setParticipants([{ id: 'me', name: displayName, email: user.email || undefined }])
-    }
-
-    loadMe()
-    return () => {
-      cancelled = true
-    }
-  }, [router])
-
   const addParticipant = () => {
-    const name = newParticipantName.trim()
-    const email = newParticipantEmail.trim()
+    if (!newParticipantName.trim()) return
 
-    if (!name) return
-
-    const newP: Participant = {
-      id: crypto.randomUUID(),
-      name,
-      email: email || undefined,
+    const p: Participant = {
+      id: Date.now().toString(),
+      name: newParticipantName.trim(),
+      email: newParticipantEmail.trim() || undefined,
     }
 
-    setParticipants((prev) => [...prev, newP])
+    setParticipants((prev) => [...prev, p])
     setNewParticipantName('')
     setNewParticipantEmail('')
   }
 
   const removeParticipant = (id: string) => {
-    if (id === 'me') return
+    if (id === '1') return
     setParticipants((prev) => prev.filter((p) => p.id !== id))
   }
 
-  const handleCreateGroup = async (e?: React.MouseEvent<HTMLButtonElement>) => {
-    e?.preventDefault()
-    if (loading) return
+  const handleCreateGroup = async () => {
+    if (saving) return
 
     const name = groupName.trim()
     if (!name || participants.length < 2) {
@@ -99,73 +68,70 @@ export default function CreateGroup() {
       return
     }
 
-    setLoading(true)
+    setSaving(true)
 
     try {
-      // 1) Garantir user logado
-      const { data: userData, error: userErr } = await supabase.auth.getUser()
-      if (userErr || !userData?.user) {
-        alert('Você precisa estar logado.')
-        router.push('/login')
+      // 1) sessão
+      const {
+        data: { session },
+        error: sErr,
+      } = await supabase.auth.getSession()
+
+      if (sErr) throw new Error(sErr.message)
+      if (!session) {
+        router.replace('/login')
         return
       }
-      const user = userData.user
 
-      // 2) Criar grupo
-      const { data: group, error: groupErr } = await supabase
+      const myId = session.user.id
+
+      // 2) monta participants jsonb (pro UI e pra não depender de user_id dos convidados)
+      const participantsJson = participants.map((p) => ({
+        // "Você" vira o id real do auth
+        id: p.id === '1' ? myId : p.id,
+        name: p.id === '1' ? (session.user.user_metadata?.name ?? 'Você') : p.name,
+        email: p.id === '1' ? session.user.email : p.email,
+      }))
+
+      // 3) cria grupo (retorna id)
+      const { data: insertedGroup, error: gErr } = await supabase
         .from('groups')
         .insert({
+          owner_id: myId,
           name,
           category,
-          owner_id: user.id,
+          participants: participantsJson, // <-- jsonb no groups
         })
         .select('id')
         .single()
 
-      if (groupErr || !group?.id) {
-        console.error('Erro ao criar grupo:', groupErr)
-        alert('Erro ao criar grupo no banco.')
-        return
-      }
+      if (gErr) throw new Error(gErr.message)
+      if (!insertedGroup?.id) throw new Error('Grupo criado mas não retornou ID.')
 
-      // 3) Inserir participantes
-      // Dono: user_id = user.id
-      // Convidados: user_id = null (precisa do SQL pra liberar null)
-      const payload = participants.map((p) => {
-        if (p.id === 'me') {
-          return {
-            group_id: group.id,
-            user_id: user.id,
-            name: p.name,
-            email: user.email ?? p.email ?? null,
-          }
-        }
+      const groupId = insertedGroup.id as string
 
-        return {
-          group_id: group.id,
-          user_id: null,
-          name: p.name,
-          email: p.email ?? null,
-        }
+      // 4) garante o owner na tabela participants (user_id NOT NULL)
+      // (não tenta inserir convidados com user_id nulo pra não quebrar)
+      const { error: pErr } = await supabase.from('participants').insert({
+        group_id: groupId,
+        user_id: myId,
+        name: participantsJson[0]?.name ?? 'Você',
+        email: session.user.email ?? null,
       })
 
-      const { error: partErr } = await supabase.from('participants').insert(payload)
-
-      if (partErr) {
-        console.error('Grupo criado, mas falhou ao salvar participantes:', partErr)
-        alert('Grupo foi criado, mas deu erro ao salvar participantes. (Veja o Console)')
-        // Mesmo assim, dá pra entrar no grupo
-        router.push(`/group/${group.id}`)
-        return
+      if (pErr) {
+        // Se isso falhar, melhor avisar pq afeta RLS de leitura/edição
+        throw new Error(`Grupo criado, mas falhou ao salvar participante dono: ${pErr.message}`)
       }
 
-      // 4) Ir para a página do grupo
-      router.push(`/group/${group.id}`)
-    } catch (err) {
-      console.error(err)
-      alert('Erro inesperado ao criar grupo. Veja o Console.')
+      // 5) redireciona pro grupo
+      router.push(`/group/${groupId}`)
+      router.refresh()
+    } catch (err: any) {
+      console.error('Erro ao criar grupo:', err)
+      alert(err?.message ?? 'Erro ao criar grupo.')
     } finally {
-      setLoading(false)
+      setSaving(false)
     }
   }
 
@@ -174,7 +140,7 @@ export default function CreateGroup() {
       {/* Header */}
       <header className="bg-white shadow-sm">
         <div className="max-w-4xl mx-auto px-4 py-4 flex justify-between items-center">
-          <Link href="/">
+          <Link href="/" aria-label="Voltar">
             <button type="button" className="text-gray-600 hover:text-gray-800">
               <ArrowLeft className="w-6 h-6" />
             </button>
@@ -185,10 +151,10 @@ export default function CreateGroup() {
           <button
             type="button"
             onClick={handleCreateGroup}
-            disabled={loading}
-            className="text-[#5BC5A7] font-medium hover:text-[#4AB396] disabled:opacity-60"
+            disabled={saving}
+            className="text-[#5BC5A7] font-medium hover:text-[#4AB396] disabled:opacity-50"
           >
-            {loading ? 'Salvando...' : 'Criar'}
+            {saving ? 'Salvando...' : 'Criar'}
           </button>
         </div>
       </header>
@@ -232,7 +198,7 @@ export default function CreateGroup() {
             Participantes ({participants.length})
           </label>
 
-          {/* Lista de Participantes */}
+          {/* Lista */}
           <div className="space-y-2 mb-4">
             {participants.map((participant) => (
               <div
@@ -251,7 +217,7 @@ export default function CreateGroup() {
                   </div>
                 </div>
 
-                {participant.id !== 'me' && (
+                {participant.id !== '1' && (
                   <button
                     type="button"
                     onClick={() => removeParticipant(participant.id)}
@@ -264,7 +230,7 @@ export default function CreateGroup() {
             ))}
           </div>
 
-          {/* Adicionar Participante */}
+          {/* Adicionar */}
           <div className="space-y-2 pt-4 border-t border-gray-200">
             <input
               type="text"
@@ -273,7 +239,6 @@ export default function CreateGroup() {
               placeholder="Nome do participante"
               className="w-full px-4 py-2 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#5BC5A7] focus:border-transparent text-sm"
             />
-
             <input
               type="email"
               value={newParticipantEmail}
@@ -297,10 +262,10 @@ export default function CreateGroup() {
         <button
           type="button"
           onClick={handleCreateGroup}
-          disabled={loading}
-          className="w-full py-4 bg-[#5BC5A7] text-white rounded-xl font-medium hover:bg-[#4AB396] transition-colors shadow-sm disabled:opacity-60"
+          disabled={saving}
+          className="w-full py-4 bg-[#5BC5A7] text-white rounded-xl font-medium hover:bg-[#4AB396] transition-colors shadow-sm disabled:opacity-50"
         >
-          {loading ? 'Salvando...' : 'Criar grupo'}
+          {saving ? 'Salvando...' : 'Criar grupo'}
         </button>
       </main>
     </div>
