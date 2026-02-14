@@ -1,70 +1,105 @@
 'use client'
 
-import { useEffect, useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
-import Link from 'next/link'
+import { useEffect, useState } from 'react'
 import { supabase } from '@/lib/supabase'
+import { ArrowLeft, Plus } from 'lucide-react'
+import Link from 'next/link'
+
+interface Transaction {
+  id: string
+  description: string
+  value: number
+  created_at: string
+}
 
 export default function GroupPage() {
-  const params = useParams()
+  const { id } = useParams()
   const router = useRouter()
-  const groupId = String(params?.id ?? '')
+
+  const [groupName, setGroupName] = useState('')
+  const [transactions, setTransactions] = useState<Transaction[]>([])
   const [loading, setLoading] = useState(true)
-  const [groupName, setGroupName] = useState<string>('')
 
   useEffect(() => {
-    const run = async () => {
-      const { data: sessionData } = await supabase.auth.getSession()
-      if (!sessionData.session) {
-        router.replace('/login')
+    const loadData = async () => {
+      if (!id) return
+
+      // Busca grupo
+      const { data: group } = await supabase
+        .from('groups')
+        .select('name')
+        .eq('id', id)
+        .single()
+
+      if (!group) {
+        router.replace('/')
         return
       }
 
-      const { data, error } = await supabase
-        .from('groups')
-        .select('id,name')
-        .eq('id', groupId)
-        .single()
+      setGroupName(group.name)
 
-      if (error) {
-        console.error('Erro ao carregar grupo:', error.message)
-        setGroupName('Grupo não encontrado')
-      } else {
-        setGroupName(data?.name ?? '')
-      }
+      // Busca gastos
+      const { data: tx } = await supabase
+        .from('transactions')
+        .select('*')
+        .eq('group_id', id)
+        .order('created_at', { ascending: false })
 
+      setTransactions(tx || [])
       setLoading(false)
     }
 
-    if (groupId) run()
-  }, [groupId, router])
+    loadData()
+  }, [id, router])
 
   if (loading) {
     return (
-      <div className="min-h-screen bg-[#F7F7F7] flex items-center justify-center">
-        <div className="text-gray-600 text-lg">Carregando grupo...</div>
+      <div className="min-h-screen flex items-center justify-center">
+        Carregando...
       </div>
     )
   }
 
   return (
-    <div className="min-h-screen bg-[#F7F7F7] p-6">
-      <div className="max-w-3xl mx-auto">
-        <div className="flex items-center justify-between mb-6">
-          <Link href="/" className="text-[#5BC5A7] font-medium">← Voltar</Link>
-          <div className="text-sm text-gray-500">ID: {groupId}</div>
+    <div className="min-h-screen bg-[#F7F7F7] pb-24">
+      <header className="bg-white shadow-sm">
+        <div className="max-w-4xl mx-auto px-4 py-4 flex items-center gap-4">
+          <Link href="/">
+            <ArrowLeft className="w-6 h-6 text-gray-600 cursor-pointer" />
+          </Link>
+          <h1 className="text-xl font-bold">{groupName}</h1>
         </div>
+      </header>
 
-        <h1 className="text-2xl font-bold text-gray-800 mb-2">{groupName}</h1>
-        <p className="text-gray-600 mb-6">
-          Agora essa rota é a correta. Aqui entra a tela de adicionar gastos/editar grupo.
-        </p>
+      <main className="max-w-4xl mx-auto p-4 space-y-3">
+        {transactions.length === 0 ? (
+          <div className="text-center text-gray-500 py-10">
+            Nenhum gasto ainda.
+          </div>
+        ) : (
+          transactions.map((tx) => (
+            <div
+              key={tx.id}
+              className="bg-white p-4 rounded-lg shadow-sm"
+            >
+              <p className="font-medium">{tx.description}</p>
+              <p className="text-sm text-gray-600">
+                R$ {Number(tx.value).toFixed(2)}
+              </p>
+            </div>
+          ))
+        )}
+      </main>
 
-        {/* Aqui você pluga sua tela de gastos */}
-        <div className="bg-white rounded-xl p-6 shadow-sm border border-gray-100">
-          <p className="text-gray-700">🚧 Tela de gastos vem aqui.</p>
-        </div>
-      </div>
+      {/* Botão adicionar gasto */}
+      <button
+        type="button"
+        onClick={() => router.push(`/group/${id}/add-expense`)}
+        className="fixed bottom-20 right-6 w-16 h-16 bg-[#5BC5A7] rounded-full flex items-center justify-center shadow-lg hover:bg-[#4AB396] transition-all"
+      >
+        <Plus className="w-8 h-8 text-white" />
+      </button>
     </div>
   )
 }
