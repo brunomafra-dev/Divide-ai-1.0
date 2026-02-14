@@ -1,348 +1,209 @@
 'use client'
 
-import { Plus, User, TrendingUp, TrendingDown } from 'lucide-react'
+import { ArrowLeft, Plus, X } from 'lucide-react'
 import Link from 'next/link'
-import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { supabase } from '@/lib/supabase'
-import BottomNav from '@/components/ui/bottom-nav'
+import { useState } from 'react'
 
-interface Member {
+interface Participant {
   id: string
   name: string
-  avatar?: string
+  email?: string
 }
 
-interface GroupRow {
-  id: string
-  name: string
-  owner_id?: string
-  category?: string
-  created_at?: string
-}
-
-interface ParticipantRow {
-  group_id: string
-  user_id: string | null
-  name: string | null
-  email: string | null
-}
-
-interface TransactionRow {
-  id: string
-  group_id: string
-  value: number
-  payer_id: string
-  splits?: any
-}
-
-interface GroupUI {
-  id: string
-  name: string
-  totalSpent: number
-  balance: number
-  participants: number
-  members?: Member[]
-}
-
-export default function Home() {
+export default function CreateGroup() {
   const router = useRouter()
-  const [groups, setGroups] = useState<GroupUI[]>([])
-  const [totalBalance, setTotalBalance] = useState(0)
-  const [loading, setLoading] = useState(true)
+  const [groupName, setGroupName] = useState('')
+  const [category, setCategory] = useState<'apartment' | 'house' | 'trip' | 'other'>('other')
+  const [participants, setParticipants] = useState<Participant[]>([
+    { id: '1', name: 'Você', email: 'voce@email.com' }
+  ])
+  const [newParticipantName, setNewParticipantName] = useState('')
+  const [newParticipantEmail, setNewParticipantEmail] = useState('')
 
-  const getInitials = (name: string) => {
-    const parts = String(name || '').trim().split(' ').filter(Boolean)
-    if (parts.length >= 2) return (parts[0][0] + parts[1][0]).toUpperCase()
-    return String(name || '').substring(0, 2).toUpperCase()
+  const categories = [
+    { id: 'apartment', label: 'Apartamento', icon: '🏢' },
+    { id: 'house', label: 'Casa', icon: '🏠' },
+    { id: 'trip', label: 'Viagem', icon: '✈️' },
+    { id: 'other', label: 'Outro', icon: '📋' },
+  ]
+
+  const addParticipant = () => {
+    if (newParticipantName.trim()) {
+      const newParticipant: Participant = {
+        id: Date.now().toString(),
+        name: newParticipantName.trim(),
+        email: newParticipantEmail.trim() || undefined,
+      }
+      setParticipants([...participants, newParticipant])
+      setNewParticipantName('')
+      setNewParticipantEmail('')
+    }
   }
 
-  const renderMemberAvatars = (members?: Member[], maxDisplay: number = 4) => {
-    if (!members || members.length === 0) return null
-
-    const displayMembers = members.slice(0, maxDisplay)
-    const remaining = members.length - maxDisplay
-
-    return (
-      <div className="flex items-center -space-x-2">
-        {displayMembers.map((member, index) => (
-          <div
-            key={member.id}
-            className="w-8 h-8 rounded-full bg-gradient-to-br from-[#5BC5A7] to-[#4AB396] flex items-center justify-center text-white text-xs font-medium border-2 border-white"
-            style={{ zIndex: displayMembers.length - index }}
-            title={member.name}
-          >
-            {member.avatar ? (
-              // eslint-disable-next-line @next/next/no-img-element
-              <img
-                src={member.avatar}
-                alt={member.name}
-                className="w-full h-full rounded-full object-cover"
-              />
-            ) : (
-              getInitials(member.name)
-            )}
-          </div>
-        ))}
-
-        {remaining > 0 && (
-          <div
-            className="w-8 h-8 rounded-full bg-gray-200 flex items-center justify-center text-gray-600 text-xs font-medium border-2 border-white"
-            style={{ zIndex: 0 }}
-            title={`+${remaining}`}
-          >
-            +{remaining}
-          </div>
-        )}
-      </div>
-    )
+  const removeParticipant = (id: string) => {
+    if (id === '1') return // Não pode remover "Você"
+    setParticipants(participants.filter(p => p.id !== id))
   }
 
-  useEffect(() => {
-    const run = async () => {
-      setLoading(true)
-
-      // 1) Sessão
-      const {
-        data: { session },
-      } = await supabase.auth.getSession()
-
-      if (!session) {
-        router.replace('/login')
-        return
-      }
-
-      const myId = session.user.id
-
-      // 2) Carrega grupos (SEM participants)
-      const { data: groupRows, error: gErr } = await supabase
-        .from('groups')
-        .select('id,name,owner_id,category,created_at')
-        .order('created_at', { ascending: false })
-
-      if (gErr) {
-        console.error('Erro ao carregar groups:', gErr.message)
-        setGroups([])
-        setTotalBalance(0)
-        setLoading(false)
-        return
-      }
-
-      const safeGroups: GroupRow[] = (groupRows as any) || []
-      const groupIds = safeGroups.map((g) => g.id)
-
-      // 3) Carrega participants por group_id
-      const participantsByGroup: Record<string, ParticipantRow[]> = {}
-
-      if (groupIds.length > 0) {
-        const { data: pRows, error: pErr } = await supabase
-          .from('participants')
-          .select('group_id,user_id,name,email')
-          .in('group_id', groupIds)
-
-        if (pErr) {
-          console.error('Erro ao carregar participants:', pErr.message)
-        } else {
-          for (const p of (pRows as any as ParticipantRow[]) || []) {
-            const gid = String(p.group_id)
-            if (!participantsByGroup[gid]) participantsByGroup[gid] = []
-            participantsByGroup[gid].push(p)
-          }
-        }
-      }
-
-      // 4) Carrega transações
-      const { data: txRows, error: tErr } = await supabase
-        .from('transactions')
-        .select('id,group_id,value,payer_id,splits')
-
-      if (tErr) {
-        console.error('Erro ao carregar transactions:', tErr.message)
-      }
-
-      const safeTx: TransactionRow[] = ((txRows as any) || []).map((t: any) => ({
-        ...t,
-        value: Number(t.value) || 0,
-      }))
-
-      // 5) Monta UI + calcula saldos
-      let global = 0
-
-      const uiGroups: GroupUI[] = safeGroups.map((g) => {
-        const groupTx = safeTx.filter((tx) => tx.group_id === g.id)
-        const totalSpent = groupTx.reduce((acc, tx) => acc + (Number(tx.value) || 0), 0)
-
-        const membersRaw = participantsByGroup[String(g.id)] ?? []
-        const members: Member[] = membersRaw.map((p) => ({
-          id: String(p.user_id ?? p.email ?? p.name ?? `${g.id}-${Math.random()}`),
-          name: String(p.name ?? p.email ?? 'Usuário'),
-        }))
-
-        const participantsCount = members.length
-
-        let paidByMe = 0
-        let myShare = 0
-
-        for (const tx of groupTx) {
-          if (String(tx.payer_id) === String(myId)) {
-            paidByMe += Number(tx.value) || 0
-          }
-
-          const splits = tx.splits
-          if (splits && typeof splits === 'object' && !Array.isArray(splits)) {
-            if (splits[myId] != null) myShare += Number(splits[myId]) || 0
-            else if (splits.self != null) myShare += Number(splits.self) || 0
-          }
-        }
-
-        const balance = paidByMe - myShare
-        global += balance
-
-        return {
-          id: g.id,
-          name: g.name,
-          totalSpent,
-          balance,
-          participants: participantsCount,
-          members,
-        }
-      })
-
-      setGroups(uiGroups)
-      setTotalBalance(global)
-      setLoading(false)
+  const handleCreateGroup = () => {
+    if (!groupName.trim() || participants.length < 2) {
+      alert('Adicione um nome e pelo menos 2 participantes')
+      return
     }
 
-    run()
-  }, [router])
+    // Salvar grupo no localStorage
+    const savedGroups = localStorage.getItem('divideai_groups')
+    const groups = savedGroups ? JSON.parse(savedGroups) : []
+    
+    const newGroup = {
+      id: Date.now().toString(),
+      name: groupName,
+      category,
+      totalSpent: 0,
+      balance: 0,
+      participants: participants.length,
+      participantsList: participants,
+      transactions: [],
+    }
 
-  if (loading) {
-    return (
-      <div className="min-h-screen bg-[#F7F7F7] flex items-center justify-center">
-        <div className="text-gray-600 text-lg">Carregando...</div>
-      </div>
-    )
+    groups.push(newGroup)
+    localStorage.setItem('divideai_groups', JSON.stringify(groups))
+    localStorage.setItem(`divideai_group_${newGroup.id}`, JSON.stringify(newGroup))
+
+    router.push(`/group/${newGroup.id}`)
   }
 
   return (
-    <div className="min-h-screen bg-[#F7F7F7] pb-20">
+    <div className="min-h-screen bg-[#F7F7F7]">
+      {/* Header */}
       <header className="bg-white shadow-sm">
         <div className="max-w-4xl mx-auto px-4 py-4 flex justify-between items-center">
-          <h1 className="text-2xl font-bold text-[#5BC5A7]">Divide Aí</h1>
-          <Link href="/profile">
-            <div className="w-10 h-10 bg-[#5BC5A7] rounded-full flex items-center justify-center cursor-pointer hover:bg-[#4AB396] transition-colors">
-              <User className="w-6 h-6 text-white" />
-            </div>
+          <Link href="/">
+            <button className="text-gray-600 hover:text-gray-800">
+              <ArrowLeft className="w-6 h-6" />
+            </button>
           </Link>
+          <h1 className="text-lg font-semibold text-gray-800">Criar grupo</h1>
+          <button
+            onClick={handleCreateGroup}
+            className="text-[#5BC5A7] font-medium hover:text-[#4AB396]"
+          >
+            Criar
+          </button>
         </div>
       </header>
 
-      <div className="bg-white border-b border-gray-200">
-        <div className="max-w-4xl mx-auto px-4 py-6">
-          <div className="text-center">
-            <p className="text-sm text-gray-600 mb-1">Saldo total</p>
-            <div className="flex items-center justify-center gap-2">
-              {totalBalance === 0 ? (
-                <>
-                  <p className="text-3xl font-bold text-gray-800">R$ 0,00</p>
-                  <span className="text-sm text-gray-500 bg-gray-100 px-3 py-1 rounded-full">zerado</span>
-                </>
-              ) : totalBalance > 0 ? (
-                <>
-                  <TrendingUp className="w-6 h-6 text-[#5BC5A7]" />
-                  <p className="text-3xl font-bold text-[#5BC5A7]">R$ {totalBalance.toFixed(2)}</p>
-                  <span className="text-sm text-[#5BC5A7] bg-green-50 px-3 py-1 rounded-full">te devem</span>
-                </>
-              ) : (
-                <>
-                  <TrendingDown className="w-6 h-6 text-[#FF6B6B]" />
-                  <p className="text-3xl font-bold text-[#FF6B6B]">R$ {Math.abs(totalBalance).toFixed(2)}</p>
-                  <span className="text-sm text-[#FF6B6B] bg-red-50 px-3 py-1 rounded-full">você deve</span>
-                </>
-              )}
-            </div>
-          </div>
+      <main className="max-w-4xl mx-auto px-4 py-6 space-y-6">
+        {/* Nome do Grupo */}
+        <div className="bg-white rounded-xl p-4 shadow-sm">
+          <label className="block text-sm font-medium text-gray-700 mb-2">
+            Nome do grupo
+          </label>
+          <input
+            type="text"
+            value={groupName}
+            onChange={(e) => setGroupName(e.target.value)}
+            placeholder="Ex: Viagem para Praia"
+            className="w-full px-4 py-3 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#5BC5A7] focus:border-transparent"
+          />
         </div>
-      </div>
 
-      <div className="bg-white border-b border-gray-200">
-        <div className="max-w-4xl mx-auto px-4 py-3">
-          <div className="bg-gray-100 rounded-lg p-3 text-center border-2 border-dashed border-gray-300">
-            <p className="text-xs text-gray-500">Espaço reservado para anúncio</p>
-          </div>
-        </div>
-      </div>
-
-      <main className="max-w-4xl mx-auto px-4 py-6">
-        {groups.length === 0 ? (
-          <div className="text-center py-12">
-            <div className="w-20 h-20 bg-gray-100 rounded-full flex items-center justify-center mx-auto mb-4">
-              <Plus className="w-10 h-10 text-gray-400" />
-            </div>
-            <h3 className="text-lg font-medium text-gray-800 mb-2">Nenhum grupo ainda</h3>
-            <p className="text-gray-600 mb-6">Crie seu primeiro grupo para começar a dividir gastos</p>
-            <Link href="/create-group">
-              <button className="bg-[#5BC5A7] text-white px-6 py-3 rounded-lg hover:bg-[#4AB396] transition-colors">
-                Criar primeiro grupo
+        {/* Categoria */}
+        <div className="bg-white rounded-xl p-4 shadow-sm">
+          <label className="block text-sm font-medium text-gray-700 mb-3">
+            Categoria
+          </label>
+          <div className="grid grid-cols-4 gap-3">
+            {categories.map((cat) => (
+              <button
+                key={cat.id}
+                onClick={() => setCategory(cat.id as any)}
+                className={`flex flex-col items-center gap-2 p-3 rounded-lg border-2 transition-all ${
+                  category === cat.id
+                    ? 'border-[#5BC5A7] bg-green-50'
+                    : 'border-gray-200 hover:border-gray-300'
+                }`}
+              >
+                <span className="text-2xl">{cat.icon}</span>
+                <span className="text-xs font-medium text-gray-700">{cat.label}</span>
               </button>
-            </Link>
+            ))}
           </div>
-        ) : (
-          <>
-            <div className="flex justify-between items-center mb-4">
-              <h2 className="text-lg font-semibold text-gray-800">Seus grupos</h2>
-              <span className="text-sm text-gray-600">{groups.length} {groups.length === 1 ? 'grupo' : 'grupos'}</span>
-            </div>
+        </div>
 
-            <div className="space-y-3">
-              {groups.map((group) => (
-                <Link key={group.id} href={`/group/${group.id}`}>
-                  <div className="bg-white rounded-xl p-4 shadow-sm hover:shadow-md transition-all cursor-pointer border border-gray-100">
-                    <div className="flex justify-between items-start mb-3">
-                      <div className="flex-1">
-                        <h3 className="text-lg font-medium text-gray-800 mb-1">{group.name}</h3>
-                        <div className="flex items-center gap-4 text-sm text-gray-600">
-                          <span>{group.participants} {group.participants === 1 ? 'pessoa' : 'pessoas'}</span>
-                          <span>•</span>
-                          <span>R$ {group.totalSpent.toFixed(2)} gasto</span>
-                        </div>
-                      </div>
-
-                      <div className="text-right ml-4">
-                        {group.balance === 0 ? (
-                          <span className="text-sm text-gray-500 bg-gray-100 px-3 py-1 rounded-full">zerado</span>
-                        ) : group.balance > 0 ? (
-                          <div className="text-right">
-                            <p className="text-xs text-gray-600 mb-1">te devem</p>
-                            <p className="text-lg font-semibold text-[#5BC5A7]">R$ {group.balance.toFixed(2)}</p>
-                          </div>
-                        ) : (
-                          <div className="text-right">
-                            <p className="text-xs text-gray-600 mb-1">você deve</p>
-                            <p className="text-lg font-semibold text-[#FF6B6B]">R$ {Math.abs(group.balance).toFixed(2)}</p>
-                          </div>
-                        )}
-                      </div>
-                    </div>
-
-                    <div className="pt-3 border-t border-gray-100">
-                      {renderMemberAvatars(group.members, 4)}
-                    </div>
+        {/* Participantes */}
+        <div className="bg-white rounded-xl p-4 shadow-sm">
+          <label className="block text-sm font-medium text-gray-700 mb-3">
+            Participantes ({participants.length})
+          </label>
+          
+          {/* Lista de Participantes */}
+          <div className="space-y-2 mb-4">
+            {participants.map((participant) => (
+              <div
+                key={participant.id}
+                className="flex items-center justify-between p-3 bg-gray-50 rounded-lg"
+              >
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 bg-[#5BC5A7] rounded-full flex items-center justify-center">
+                    <span className="text-white font-medium text-sm">
+                      {participant.name.charAt(0).toUpperCase()}
+                    </span>
                   </div>
-                </Link>
-              ))}
-            </div>
-          </>
-        )}
-      </main>
+                  <div>
+                    <p className="text-sm font-medium text-gray-800">{participant.name}</p>
+                    {participant.email && (
+                      <p className="text-xs text-gray-500">{participant.email}</p>
+                    )}
+                  </div>
+                </div>
+                {participant.id !== '1' && (
+                  <button
+                    onClick={() => removeParticipant(participant.id)}
+                    className="text-gray-400 hover:text-red-500"
+                  >
+                    <X className="w-5 h-5" />
+                  </button>
+                )}
+              </div>
+            ))}
+          </div>
 
-      <Link href="/create-group">
-        <button className="fixed bottom-20 right-6 w-16 h-16 bg-[#5BC5A7] rounded-full flex items-center justify-center shadow-lg hover:bg-[#4AB396] transition-all hover:scale-110">
-          <Plus className="w-8 h-8 text-white" />
+          {/* Adicionar Participante */}
+          <div className="space-y-2 pt-4 border-t border-gray-200">
+            <input
+              type="text"
+              value={newParticipantName}
+              onChange={(e) => setNewParticipantName(e.target.value)}
+              placeholder="Nome do participante"
+              className="w-full px-4 py-2 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#5BC5A7] focus:border-transparent text-sm"
+            />
+            <input
+              type="email"
+              value={newParticipantEmail}
+              onChange={(e) => setNewParticipantEmail(e.target.value)}
+              placeholder="Email (opcional)"
+              className="w-full px-4 py-2 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#5BC5A7] focus:border-transparent text-sm"
+            />
+            <button
+              onClick={addParticipant}
+              className="w-full flex items-center justify-center gap-2 px-4 py-2 bg-[#5BC5A7] text-white rounded-lg hover:bg-[#4AB396] transition-colors"
+            >
+              <Plus className="w-4 h-4" />
+              <span className="text-sm font-medium">Adicionar participante</span>
+            </button>
+          </div>
+        </div>
+
+        {/* Botão Criar */}
+        <button
+          onClick={handleCreateGroup}
+          className="w-full py-4 bg-[#5BC5A7] text-white rounded-xl font-medium hover:bg-[#4AB396] transition-colors shadow-sm"
+        >
+          Criar grupo
         </button>
-      </Link>
-
-      <BottomNav />
+      </main>
     </div>
   )
 }

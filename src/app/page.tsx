@@ -16,13 +16,8 @@ interface Member {
 interface GroupRow {
   id: string
   name: string
-}
-
-interface ParticipantRow {
-  group_id: string
-  user_id: string | null
-  name: string | null
-  email: string | null
+  // Pode vir como jsonb (array) no Supabase:
+  participants?: any
 }
 
 interface TransactionRow {
@@ -30,6 +25,7 @@ interface TransactionRow {
   group_id: string
   value: number
   payer_id: string
+  // Pode vir como jsonb object: { "self": 55, "<userId>": 20, ... }
   splits?: any
 }
 
@@ -82,15 +78,15 @@ export default function Home() {
           </div>
         ))}
 
-        {remaining > 0 && (
-          <div
-            className="w-8 h-8 rounded-full bg-gray-200 flex items-center justify-center text-gray-600 text-xs font-medium border-2 border-white"
-            style={{ zIndex: 0 }}
-            title={`+${remaining}`}
-          >
-            +{remaining}
-          </div>
-        )}
+     {remaining > 0 && (
+  <div
+    className="w-8 h-8 rounded-full bg-gray-200 flex items-center justify-center text-gray-600 text-xs font-medium border-2 border-white"
+    style={{ zIndex: 0 }}
+    title={`+${remaining}`}
+  >
+    +{remaining}
+  </div>
+)}
       </div>
     )
   }
@@ -111,11 +107,15 @@ export default function Home() {
 
       const myId = session.user.id
 
-      // ✅ 2) Carrega grupos (SEM participants pq não existe na tabela)
+      // ✅ 2) Limpa mocks antigos do localStorage (pra matar os fantasmas de vez)
+      try {
+        localStorage.removeItem('divideai_groups')
+      } catch {}
+
+      // ✅ 3) Carrega grupos
       const { data: groupRows, error: gErr } = await supabase
         .from('groups')
-        .select('id,name')
-        .order('created_at', { ascending: false })
+        .select('id,name,participants')
 
       if (gErr) {
         console.error('Erro ao carregar groups:', gErr.message)
@@ -127,18 +127,8 @@ export default function Home() {
 
       const safeGroups: GroupRow[] = (groupRows as any) || []
 
-      // ✅ 3) Carrega participantes (pra montar os avatars e contagem)
-      const { data: participantRows, error: pErr } = await supabase
-        .from('participants')
-        .select('group_id,user_id,name,email')
-
-      if (pErr) {
-        console.error('Erro ao carregar participants:', pErr.message)
-      }
-
-      const safeParticipants: ParticipantRow[] = ((participantRows as any) || [])
-
-      // ✅ 4) Carrega transações
+      // ✅ 4) Carrega transações (para calcular totalSpent e balance)
+      // Se teu app tiver MUITA transação, depois otimizamos por group_id IN (...)
       const { data: txRows, error: tErr } = await supabase
         .from('transactions')
         .select('id,group_id,value,payer_id,splits')
@@ -157,16 +147,27 @@ export default function Home() {
 
       const uiGroups: GroupUI[] = safeGroups.map((g) => {
         const groupTx = safeTx.filter((tx) => tx.group_id === g.id)
+
         const totalSpent = groupTx.reduce((acc, tx) => acc + (Number(tx.value) || 0), 0)
 
-        const groupMembersRows = safeParticipants.filter((p) => p.group_id === g.id)
+        // participants pode ser:
+        // - array de objetos [{id,name}]
+        // - array de ids
+        // - null
+        const participantsArr: any[] = Array.isArray(g.participants) ? g.participants : []
+        const members: Member[] = participantsArr
+          .map((p: any) => {
+            if (!p) return null
+            if (typeof p === 'string') return { id: p, name: p } // fallback tosco
+            return {
+              id: String(p.id ?? p.user_id ?? p.uid ?? ''),
+              name: String(p.name ?? p.email ?? 'Usuário'),
+              avatar: p.avatar ?? p.photo_url ?? undefined,
+            }
+          })
+          .filter(Boolean) as Member[]
 
-        const members: Member[] = groupMembersRows.map((p) => ({
-          id: String(p.user_id || p.email || p.name || Math.random()),
-          name: String(p.name || p.email || 'Usuário'),
-        }))
-
-        const participantsCount = members.length
+        const participantsCount = members.length || participantsArr.length || 0
 
         let paidByMe = 0
         let myShare = 0
@@ -177,6 +178,11 @@ export default function Home() {
           }
 
           const splits = tx.splits
+
+          // splits no teu histórico apareceu como { "self": 55, "<uuid>": 125 ...}
+          // então a prioridade correta é:
+          // 1) se existir splits[myId]
+          // 2) senão, se existir splits.self (caso você esteja gravando self como "você")
           if (splits && typeof splits === 'object' && !Array.isArray(splits)) {
             if (splits[myId] != null) myShare += Number(splits[myId]) || 0
             else if (splits.self != null) myShare += Number(splits.self) || 0
@@ -204,6 +210,7 @@ export default function Home() {
     run()
   }, [router])
 
+  // Loading
   if (loading) {
     return (
       <div className="min-h-screen bg-[#F7F7F7] flex items-center justify-center">
@@ -265,7 +272,7 @@ export default function Home() {
         </div>
       </div>
 
-      {/* Ad Space */}
+      {/* Ad Space Placeholder */}
       <div className="bg-white border-b border-gray-200">
         <div className="max-w-4xl mx-auto px-4 py-3">
           <div className="bg-gray-100 rounded-lg p-3 text-center border-2 border-dashed border-gray-300">
@@ -300,15 +307,13 @@ export default function Home() {
 
             <div className="space-y-3">
               {groups.map((group) => (
-                <Link key={group.id} href={`/group/${group.id}`}>
+               <Link key={group.id} href={`/group/${group.id}`}>
                   <div className="bg-white rounded-xl p-4 shadow-sm hover:shadow-md transition-all cursor-pointer border border-gray-100">
                     <div className="flex justify-between items-start mb-3">
                       <div className="flex-1">
                         <h3 className="text-lg font-medium text-gray-800 mb-1">{group.name}</h3>
                         <div className="flex items-center gap-4 text-sm text-gray-600">
-                          <span>
-                            {group.participants} {group.participants === 1 ? 'pessoa' : 'pessoas'}
-                          </span>
+                          <span>{group.participants} {group.participants === 1 ? 'pessoa' : 'pessoas'}</span>
                           <span>•</span>
                           <span>R$ {group.totalSpent.toFixed(2)} gasto</span>
                         </div>
@@ -316,27 +321,22 @@ export default function Home() {
 
                       <div className="text-right ml-4">
                         {group.balance === 0 ? (
-                          <span className="text-sm text-gray-500 bg-gray-100 px-3 py-1 rounded-full">
-                            zerado
-                          </span>
+                          <span className="text-sm text-gray-500 bg-gray-100 px-3 py-1 rounded-full">zerado</span>
                         ) : group.balance > 0 ? (
                           <div className="text-right">
                             <p className="text-xs text-gray-600 mb-1">te devem</p>
-                            <p className="text-lg font-semibold text-[#5BC5A7]">
-                              R$ {group.balance.toFixed(2)}
-                            </p>
+                            <p className="text-lg font-semibold text-[#5BC5A7]">R$ {group.balance.toFixed(2)}</p>
                           </div>
                         ) : (
                           <div className="text-right">
                             <p className="text-xs text-gray-600 mb-1">você deve</p>
-                            <p className="text-lg font-semibold text-[#FF6B6B]">
-                              R$ {Math.abs(group.balance).toFixed(2)}
-                            </p>
+                            <p className="text-lg font-semibold text-[#FF6B6B]">R$ {Math.abs(group.balance).toFixed(2)}</p>
                           </div>
                         )}
                       </div>
                     </div>
 
+                    {/* Prévia de Membros */}
                     <div className="pt-3 border-t border-gray-100">
                       {renderMemberAvatars(group.members, 4)}
                     </div>
@@ -348,13 +348,14 @@ export default function Home() {
         )}
       </main>
 
-      {/* FAB */}
+      {/* Floating Action Button */}
       <Link href="/create-group">
         <button className="fixed bottom-20 right-6 w-16 h-16 bg-[#5BC5A7] rounded-full flex items-center justify-center shadow-lg hover:bg-[#4AB396] transition-all hover:scale-110">
           <Plus className="w-8 h-8 text-white" />
         </button>
       </Link>
 
+      {/* Bottom Navigation */}
       <BottomNav />
     </div>
   )
